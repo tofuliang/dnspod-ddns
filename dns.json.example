@@ -1,0 +1,18 @@
+{
+    "token": "xxxx,xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "domains": {
+        "example.me": [
+            "@",
+            "demo"
+        ],
+        "example.com": [
+            "@",
+            "www",
+            "telecom#telecom"
+        ]
+    },
+    "ips": {
+        "unicom": "echo '192.168.22.1'",
+        "telecom": "echo '192.168.22.2'"
+    }
+}
