@@ -1,5 +1,6 @@
 {
-    "token": "xxxx,xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "secretId": "xxx",
+    "secretKey": "xxx",
     "domains": {
         "example.me": [
             "@",

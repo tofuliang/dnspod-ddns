@@ -1,7 +1,8 @@
-github.com/fsnotify/fsnotify v1.4.9 h1:hsms1Qyu0jgnwNXIxa+/V/PDsU6CfLf6CNO8H7IWoS4=
-github.com/fsnotify/fsnotify v1.4.9/go.mod h1:znqG4EE+3YCdAaPaxE2ZRY/06pZUdp0tY4IgpuI1SZQ=
-github.com/reddec/filedb v0.0.0-20160307151855-58d4b60d8e62 h1:s37++KO9P+FHbzenHMEYu4gO2NKtFWAJwov2CZcviLA=
-github.com/reddec/filedb v0.0.0-20160307151855-58d4b60d8e62/go.mod h1:3BtvFTF1Zsxvh4FFRPs5xAXVcfyIexUG7l+7KhLq3MU=
-golang.org/x/sys v0.0.0-20191005200804-aed5e4c7ecf9/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
-golang.org/x/sys v0.0.0-20220818161305-2296e01440c6 h1:Sx/u41w+OwrInGdEckYmEuU5gHoGSL4QbDz3S9s6j4U=
-golang.org/x/sys v0.0.0-20220818161305-2296e01440c6/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+github.com/fsnotify/fsnotify v1.7.0 h1:8JEhPFa5W2WU7YfeZzPNqzMP6Lwt7L2715Ggo0nosvA=
+github.com/fsnotify/fsnotify v1.7.0/go.mod h1:40Bi/Hjc2AVfZrqy+aj+yEI+/bRxZnMJyTJwOpGvigM=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.0.964 h1:ET3EulYQvWrdD5FNwOP+196w5Vbniy/uRGucM5ILExQ=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.0.964/go.mod h1:r5r4xbfxSaeR04b166HGsBa/R4U3SueirEUpXGuw+Q0=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dnspod v1.0.964 h1:zcxznuv78WyV/KcTk2UmzWfzrGKUB8GNnLfm5LivLwY=
+github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dnspod v1.0.964/go.mod h1:w3gC7GW9hBhtygbbBiSUsGiH/J7tSe/5EaHMUvbLzBA=
+golang.org/x/sys v0.4.0 h1:Zr2JFtRQNX3BCZ8YtxRE9hNJYC8J6I1MVbMg6owUp18=
+golang.org/x/sys v0.4.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
