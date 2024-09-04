@@ -24,10 +24,12 @@ import (
 )
 
 type Config struct {
-	SecretId  string              `json:"secretId"`
-	SecretKey string              `json:"secretKey"`
-	Domains   map[string][]string `json:"domains"`
-	Ips       map[string]string   `json:"ips"`
+	SecretId   string              `json:"secretId"`
+	SecretKey  string              `json:"secretKey"`
+	HttpRecord bool                `json:"httpRecord"`
+	H3Port     json.Number         `json:"h3Port"`
+	Domains    map[string][]string `json:"domains"`
+	Ips        map[string]string   `json:"ips"`
 }
 
 func contains(sa []string, i string) bool {
@@ -42,6 +44,7 @@ func contains(sa []string, i string) bool {
 
 var confFilePath = flag.String("c", "dns.json", "配置文件路径")
 var cachePath = flag.String("d", "/tmp/dns.Cache", "缓存文件路径")
+var config Config
 
 func main() {
 	flag.Parse()
@@ -59,7 +62,7 @@ func main() {
 		fmt.Println(err)
 	}
 	modTime := file.ModTime().Unix()
-	var config Config
+
 	_ = json.Unmarshal(byteValue, &config)
 
 	dbh := db.DB{Root: *cachePath}
@@ -199,11 +202,26 @@ func checkDns(subDomains []string, db *db.DB, domain string, remarks map[string]
 				continue
 			}
 			// 本地无缓存
-			recordId := getDNSType(ip) + "-" + remark
 			var record dnspod.RecordInfo
 			lSubDomain := subDomain
 			lIp := ip
 			lRemark := remark
+			dnsType := getDNSType(ip)
+			if config.HttpRecord && dnsType == "A" {
+				var record dnspod.RecordInfo
+				lSubDomain := subDomain
+				lIp := ip
+				lRemark := remark
+				recordId := "HTTPS" + "-" + remark
+				if err := section.Get(recordId, &record); err != nil {
+					createWg.Add(1)
+					go createHttpsRecord(&lSubDomain, domainInfo, &lIp, client, section, &lRemark, &createWg)
+				} else if !strings.Contains(*record.Value, lIp) && record.Id != nil { // 本地有缓存且IP已改变
+					updateWg.Add(1)
+					go updateHttpsRecord(&lSubDomain, domainInfo, &lIp, client, &record, section, &lRemark, &updateWg)
+				}
+			}
+			recordId := dnsType + "-" + remark
 			if err := section.Get(recordId, &record); err != nil {
 				createWg.Add(1)
 				go createRecord(&lSubDomain, domainInfo, &lIp, client, section, &lRemark, &createWg)
@@ -230,9 +248,41 @@ func updateRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	modifyRecordRequest.RecordId = record.Id
 	modifyRecordRequest.SubDomain = subDomain
 	modifyRecordRequest.RecordLineId = record.RecordLineId
+	modifyRecordRequest.Remark = record.Remark
 	_, err := client.ModifyRecord(modifyRecordRequest)
 	if err != nil {
 		fmt.Printf("update failed: %s\n", err)
+		req, _ := json.Marshal(modifyRecordRequest)
+		fmt.Printf("modifyRecordRequest: %s\n", req)
+	} else {
+		makeRecordCache(client, domainInfo, record.Id, section, remark, nil)
+	}
+}
+func updateHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, client *dnspod.Client, record *dnspod.RecordInfo, section *db.Section, remark *string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	value := fmt.Sprintf(`%s.%s. alpn="h3" ipv4hint="%s" port="%s"`, *subDomain, *domainInfo.Domain, *ip, config.H3Port)
+	if *subDomain == "@" {
+		value = fmt.Sprintf(`%s. alpn="h3" ipv4hint="%s" port="%s"`, *domainInfo.Domain, *ip, config.H3Port)
+	}
+
+	fmt.Printf("[%s] Updating %s.%s[%s], value:%s\n", time.Now().Format("2006-01-02 15:04:05"), *subDomain, *domainInfo.Domain, *remark, value)
+
+	modifyRecordRequest := dnspod.NewModifyRecordRequest()
+	modifyRecordRequest.Domain = domainInfo.Domain
+	modifyRecordRequest.RecordType = record.RecordType
+	modifyRecordRequest.RecordLine = record.RecordLine
+	modifyRecordRequest.MX = record.MX
+	modifyRecordRequest.Value = &value
+	modifyRecordRequest.RecordId = record.Id
+	modifyRecordRequest.SubDomain = subDomain
+	modifyRecordRequest.RecordLineId = record.RecordLineId
+	modifyRecordRequest.Remark = record.Remark
+	_, err := client.ModifyRecord(modifyRecordRequest)
+	if err != nil {
+		fmt.Printf("update failed: %s\n", err)
+		req, _ := json.Marshal(modifyRecordRequest)
+		fmt.Printf("modifyRecordRequest: %s\n", req)
 	} else {
 		makeRecordCache(client, domainInfo, record.Id, section, remark, nil)
 	}
@@ -253,7 +303,48 @@ func createRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	createRecordResponse, err := client.CreateRecord(createRecordRequest)
 	var tencentCloudSDKError *tencentErrors.TencentCloudSDKError
 	if errors.As(err, &tencentCloudSDKError) {
-		fmt.Printf("An API error has returned: %s", err)
+		fmt.Printf("An API error has returned: %s\n", err)
+		req, _ := json.Marshal(createRecordRequest)
+		fmt.Printf("createRecordRequest: %s\n", req)
+		return
+	}
+	if createRecordResponse == nil || createRecordResponse.Response == nil || createRecordResponse.Response.RecordId == nil {
+		fmt.Printf("Empty RecordId returned: %s", createRecordResponse)
+		return
+	}
+
+	if err == nil {
+		makeRecordCache(client, domainInfo, createRecordResponse.Response.RecordId, section, remark, nil)
+	}
+}
+
+func createHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, client *dnspod.Client, section *db.Section, remark *string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	value := fmt.Sprintf(`%s.%s. alpn="h3" ipv4hint="%s" port="%s"`, *subDomain, *domainInfo.Domain, *ip, config.H3Port)
+	if *subDomain == "@" {
+		value = fmt.Sprintf(`%s. alpn="h3" ipv4hint="%s" port="%s"`, *domainInfo.Domain, *ip, config.H3Port)
+	}
+
+	fmt.Printf("[%s] creating %s.%s[%s] , value:%s\n", time.Now().Format("2006-01-02 15:04:05"), *subDomain, *domainInfo.Domain, *remark, value) // 未有此记录,需要创建
+
+	recordType := "HTTPS"
+	recordLine := "默认"
+	var mx uint64 = 1
+	createRecordRequest := dnspod.NewCreateRecordRequest()
+	createRecordRequest.SubDomain = subDomain
+	createRecordRequest.Domain = domainInfo.Domain
+	createRecordRequest.RecordType = &recordType
+	createRecordRequest.RecordLine = &recordLine
+	createRecordRequest.Value = &value
+	createRecordRequest.Remark = remark
+	createRecordRequest.MX = &mx
+	createRecordResponse, err := client.CreateRecord(createRecordRequest)
+	var tencentCloudSDKError *tencentErrors.TencentCloudSDKError
+	if errors.As(err, &tencentCloudSDKError) {
+		fmt.Printf("An API error has returned: %s\n", err)
+		req, _ := json.Marshal(createRecordRequest)
+		fmt.Printf("createHttpsRecord: %s\n", req)
 		return
 	}
 	if createRecordResponse == nil || createRecordResponse.Response == nil || createRecordResponse.Response.RecordId == nil {

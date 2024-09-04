@@ -1,6 +1,8 @@
 {
     "secretId": "xxx",
     "secretKey": "xxx",
+    "httpRecord": true,
+    "h3Port": 4433,
     "domains": {
         "example.me": [
             "@",
