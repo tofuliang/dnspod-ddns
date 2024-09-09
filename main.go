@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	tencentErrors "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	tencentErrors "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/errors"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -45,8 +46,25 @@ func contains(sa []string, i string) bool {
 var confFilePath = flag.String("c", "dns.json", "配置文件路径")
 var cachePath = flag.String("d", "/tmp/dns.Cache", "缓存文件路径")
 var config Config
+var rateLimiter = make(chan struct{}, 80)
+
+func initRateLimiter() {
+	ticker := time.NewTicker(time.Second)
+	go func() {
+		for range ticker.C {
+			for i := 0; i < 80; i++ {
+				select {
+				case rateLimiter <- struct{}{}:
+				default:
+					// 如果通道已满，不做任何操作
+				}
+			}
+		}
+	}()
+}
 
 func main() {
+	initRateLimiter()
 	flag.Parse()
 	fmt.Printf("[%s] starting ...\n", time.Now().Format("2006-01-02 15:04:05"))
 	configFile, err := os.Open(*confFilePath)
@@ -79,7 +97,6 @@ func main() {
 	remarks := make(map[string]string)
 	remarkNames := make([]string, len(remarks))
 	recordCounter := make(map[string]uint)
-
 	// 获取本地IP
 	for remark, cmd := range config.Ips {
 		out, err := exec.Command("sh", "-c", cmd).Output()
@@ -102,6 +119,7 @@ func main() {
 			fmt.Printf("[%s] cache timeout\n", time.Now().Format("2006-01-02 15:04:05"))
 			describeDomainRequest := dnspod.NewDescribeDomainRequest()
 			describeDomainRequest.Domain = &domain
+			<-rateLimiter
 			describeDomainResponse, err := client.DescribeDomain(describeDomainRequest)
 			var tencentCloudSDKError *tencentErrors.TencentCloudSDKError
 			if errors.As(err, &tencentCloudSDKError) {
@@ -109,7 +127,7 @@ func main() {
 				continue
 			}
 			if describeDomainResponse == nil || describeDomainResponse.Response == nil || describeDomainResponse.Response.DomainInfo == nil {
-				fmt.Printf("Empty DomainInfo returned: %s", describeDomainResponse)
+				fmt.Printf("Empty DomainInfo returned: %v", describeDomainResponse)
 				continue
 			}
 			domainInfo := describeDomainResponse.Response.DomainInfo
@@ -118,13 +136,14 @@ func main() {
 			describeRecordListRequest := dnspod.NewDescribeRecordListRequest()
 			describeRecordListRequest.Domain = &domain
 			describeRecordListRequest.Limit = &limit
+			<-rateLimiter
 			describeRecordListResponse, err := client.DescribeRecordList(describeRecordListRequest)
 			if errors.As(err, &tencentCloudSDKError) {
 				fmt.Printf("An API error has returned: %s", err)
 				continue
 			}
 			if describeRecordListResponse == nil || describeRecordListResponse.Response == nil || len(describeRecordListResponse.Response.RecordList) < 1 {
-				fmt.Printf("Empty RecordList returned: %s", describeRecordListResponse)
+				fmt.Printf("Empty RecordList returned: %v", describeRecordListResponse)
 				continue
 			}
 
@@ -142,11 +161,12 @@ func main() {
 						go makeRecordCache(client, domainInfo, record.RecordId, section, record.Remark, &wg)
 					} else {
 						remark := remarkNames[recordCounter[recordId+"."+domain]-1]
-						fmt.Printf("[%s] Updating %s.%s with remark %s\n", time.Now().Format("2006-01-02 15:04:05"), record.Name, domain, remark) // 未有此记录,需要更新
+						fmt.Printf("[%s] Updating %s.%s with remark %s\n", time.Now().Format("2006-01-02 15:04:05"), *record.Name, domain, remark) // 未有此记录,需要更新
 						modifyRecordRemarkRequest := dnspod.NewModifyRecordRemarkRequest()
 						modifyRecordRemarkRequest.Domain = &domain
 						modifyRecordRemarkRequest.Remark = &remark
 						modifyRecordRemarkRequest.RecordId = record.RecordId
+						<-rateLimiter
 						_, err := client.ModifyRecordRemark(modifyRecordRemarkRequest)
 						if err != nil {
 							fmt.Printf("update failed: %s\n", err)
@@ -249,6 +269,7 @@ func updateRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	modifyRecordRequest.SubDomain = subDomain
 	modifyRecordRequest.RecordLineId = record.RecordLineId
 	modifyRecordRequest.Remark = record.Remark
+	<-rateLimiter
 	_, err := client.ModifyRecord(modifyRecordRequest)
 	if err != nil {
 		fmt.Printf("update failed: %s\n", err)
@@ -278,6 +299,7 @@ func updateHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *str
 	modifyRecordRequest.SubDomain = subDomain
 	modifyRecordRequest.RecordLineId = record.RecordLineId
 	modifyRecordRequest.Remark = record.Remark
+	<-rateLimiter
 	_, err := client.ModifyRecord(modifyRecordRequest)
 	if err != nil {
 		fmt.Printf("update failed: %s\n", err)
@@ -300,6 +322,7 @@ func createRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	createRecordRequest.RecordLine = &recordLine
 	createRecordRequest.Value = ip
 	createRecordRequest.Remark = remark
+	<-rateLimiter
 	createRecordResponse, err := client.CreateRecord(createRecordRequest)
 	var tencentCloudSDKError *tencentErrors.TencentCloudSDKError
 	if errors.As(err, &tencentCloudSDKError) {
@@ -309,7 +332,7 @@ func createRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 		return
 	}
 	if createRecordResponse == nil || createRecordResponse.Response == nil || createRecordResponse.Response.RecordId == nil {
-		fmt.Printf("Empty RecordId returned: %s", createRecordResponse)
+		fmt.Printf("Empty RecordId returned: %v", createRecordResponse)
 		return
 	}
 
@@ -339,6 +362,7 @@ func createHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *str
 	createRecordRequest.Value = &value
 	createRecordRequest.Remark = remark
 	createRecordRequest.MX = &mx
+	<-rateLimiter
 	createRecordResponse, err := client.CreateRecord(createRecordRequest)
 	var tencentCloudSDKError *tencentErrors.TencentCloudSDKError
 	if errors.As(err, &tencentCloudSDKError) {
@@ -348,7 +372,7 @@ func createHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *str
 		return
 	}
 	if createRecordResponse == nil || createRecordResponse.Response == nil || createRecordResponse.Response.RecordId == nil {
-		fmt.Printf("Empty RecordId returned: %s", createRecordResponse)
+		fmt.Printf("Empty RecordId returned: %v", createRecordResponse)
 		return
 	}
 
@@ -390,13 +414,14 @@ func getRecordInfo(domain *string, recordId *uint64, client *dnspod.Client) (*dn
 	describeRecordRequest := dnspod.NewDescribeRecordRequest()
 	describeRecordRequest.Domain = domain
 	describeRecordRequest.RecordId = recordId
+	<-rateLimiter
 	describeRecordResponse, err := client.DescribeRecord(describeRecordRequest)
 	if errors.As(err, &tencentCloudSDKError) {
 		fmt.Printf("An API error has returned: %s", err)
 		return nil, err
 	}
 	if describeRecordResponse == nil || describeRecordResponse.Response == nil || describeRecordResponse.Response.RecordInfo == nil {
-		fmt.Printf("Empty RecordInfo returned: %s", describeRecordResponse)
+		fmt.Printf("Empty RecordInfo returned: %v", describeRecordResponse)
 		return nil, err
 	}
 	return describeRecordResponse.Response.RecordInfo, nil
