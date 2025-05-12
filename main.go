@@ -258,7 +258,9 @@ func checkDns(subDomains []string, db *db.DB, domain string, remarks map[string]
 }
 
 func updateRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, client *dnspod.Client, record *dnspod.RecordInfo, section *db.Section, remark *string, wg *sync.WaitGroup) {
-	defer wg.Done()
+	if wg != nil {
+		defer wg.Done()
+	}
 	fmt.Printf("[%s] Updating %s.%s[%s], IP:%s\n", time.Now().Format("2006-01-02 15:04:05"), *subDomain, *domainInfo.Domain, *remark, *ip)
 	modifyRecordRequest := dnspod.NewModifyRecordRequest()
 	modifyRecordRequest.Domain = domainInfo.Domain
@@ -270,9 +272,25 @@ func updateRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	modifyRecordRequest.RecordLineId = record.RecordLineId
 	modifyRecordRequest.Remark = record.Remark
 	<-rateLimiter
-	_, err := client.ModifyRecord(modifyRecordRequest)
+	response, err := client.ModifyRecord(modifyRecordRequest)
 	if err != nil {
-		fmt.Printf("update failed: %s\n", err)
+		if sdkErr, ok := err.(*tencentErrors.TencentCloudSDKError); ok && sdkErr.Code == "LimitExceeded.SubdomainRollLimit" {
+			fmt.Printf("LimitExceeded.SubdomainRollLimit 错误，RequestId: %s\n", sdkErr.RequestId)
+			duplicateRecordIds, err := getDuplicateRecordIdsBySubdomainAndRemark(domainInfo.Domain, record, client)
+			if err != nil {
+				fmt.Printf("getDuplicateRecordIdBySubdomainAndRemark failed: %s\n", err)
+			} else {
+				for _, duplicateRecordId := range duplicateRecordIds {
+					fmt.Printf("duplicateRecordId: %d\n", *duplicateRecordId)
+					err := deleteRecord(domainInfo.Domain, duplicateRecordId, client)
+					if err != nil {
+						fmt.Printf("deleteRecord failed: %s\n", err)
+					}
+				}
+				updateHttpsRecord(subDomain, domainInfo, ip, client, record, section, remark, nil)
+			}
+		}
+		fmt.Printf("update failed: %s\n,%v\n", err, response)
 		req, _ := json.Marshal(modifyRecordRequest)
 		fmt.Printf("modifyRecordRequest: %s\n", req)
 	} else {
@@ -280,7 +298,9 @@ func updateRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, 
 	}
 }
 func updateHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *string, client *dnspod.Client, record *dnspod.RecordInfo, section *db.Section, remark *string, wg *sync.WaitGroup) {
-	defer wg.Done()
+	if wg != nil {
+		defer wg.Done()
+	}
 
 	value := fmt.Sprintf(`%s.%s. alpn="h3" ipv4hint="%s" port="%s"`, *subDomain, *domainInfo.Domain, *ip, config.H3Port)
 	if *subDomain == "@" {
@@ -300,9 +320,26 @@ func updateHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *str
 	modifyRecordRequest.RecordLineId = record.RecordLineId
 	modifyRecordRequest.Remark = record.Remark
 	<-rateLimiter
-	_, err := client.ModifyRecord(modifyRecordRequest)
+	response, err := client.ModifyRecord(modifyRecordRequest)
 	if err != nil {
-		fmt.Printf("update failed: %s\n", err)
+		// 判断是否为 TencentCloudSDKError 并且 code 是 LimitExceeded.SubdomainRollLimit
+		if sdkErr, ok := err.(*tencentErrors.TencentCloudSDKError); ok && sdkErr.Code == "LimitExceeded.SubdomainRollLimit" {
+			fmt.Printf("LimitExceeded.SubdomainRollLimit 错误，RequestId: %s\n", sdkErr.RequestId)
+			duplicateRecordIds, err := getDuplicateRecordIdsBySubdomainAndRemark(domainInfo.Domain, record, client)
+			if err != nil {
+				fmt.Printf("getDuplicateRecordIdBySubdomainAndRemark failed: %s\n", err)
+			} else {
+				for _, duplicateRecordId := range duplicateRecordIds {
+					fmt.Printf("duplicateRecordId: %d\n", *duplicateRecordId)
+					err := deleteRecord(domainInfo.Domain, duplicateRecordId, client)
+					if err != nil {
+						fmt.Printf("deleteRecord failed: %s\n", err)
+					}
+				}
+				updateHttpsRecord(subDomain, domainInfo, ip, client, record, section, remark, nil)
+			}
+		}
+		fmt.Printf("update failed: %s\n,%v\n", err, response)
 		req, _ := json.Marshal(modifyRecordRequest)
 		fmt.Printf("modifyRecordRequest: %s\n", req)
 	} else {
@@ -383,7 +420,6 @@ func createHttpsRecord(subDomain *string, domainInfo *dnspod.DomainInfo, ip *str
 
 func makeRecordCache(client *dnspod.Client, domainInfo *dnspod.DomainInfo, recordId *uint64, section *db.Section, remark *string, wg *sync.WaitGroup) {
 	if wg != nil {
-		//fmt.Printf("[%s] defer wg.Done()\n", time.Now().Format("2006-01-02 15:04:05"))
 		defer wg.Done()
 	}
 	record, err := getRecordInfo(domainInfo.Domain, recordId, client)
@@ -436,4 +472,33 @@ func getDNSType(value string) string {
 		return "A"
 	}
 	return ""
+}
+
+func getDuplicateRecordIdsBySubdomainAndRemark(domain *string,record *dnspod.RecordInfo, client *dnspod.Client) ([]*uint64, error) {
+	describeRecordRequest := dnspod.NewDescribeRecordListRequest()
+	describeRecordRequest.DomainId = record.DomainId
+	describeRecordRequest.Domain = domain
+	describeRecordRequest.Subdomain = record.SubDomain
+	describeRecordRequest.RecordType = record.RecordType
+	<-rateLimiter
+	describeRecordResponse, err := client.DescribeRecordList(describeRecordRequest)
+	if err != nil {
+		return nil, err
+	}
+	duplicateRecordIds := make([]*uint64, 0)
+	for _, _record := range describeRecordResponse.Response.RecordList {
+		if *_record.Remark == *record.Remark && *_record.RecordId != *record.Id {
+			duplicateRecordIds = append(duplicateRecordIds, _record.RecordId)
+		}
+	}
+	return duplicateRecordIds, nil
+}
+
+func deleteRecord(domain *string, recordId *uint64, client *dnspod.Client) error {
+	deleteRecordRequest := dnspod.NewDeleteRecordRequest()
+	deleteRecordRequest.Domain = domain
+	deleteRecordRequest.RecordId = recordId
+	<-rateLimiter
+	_, err := client.DeleteRecord(deleteRecordRequest)
+	return err
 }
