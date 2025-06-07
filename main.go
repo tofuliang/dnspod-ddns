@@ -218,7 +218,7 @@ func checkDns(subDomains []string, db *db.DB, domain string, remarks map[string]
 		createWg := sync.WaitGroup{}
 		updateWg := sync.WaitGroup{}
 		for remark, ip := range remarks {
-			if len(rmk) > 0 && rmk != remark {
+			if ( len(rmk) > 0 || strings.HasPrefix(remark, ".")) && rmk != remark {
 				continue
 			}
 			// 本地无缓存
